@@ -60,6 +60,8 @@
 #define ERROR_PUSH_SIMULATOR_NOT_SUPPORTED -15
 #define ERROR_PUSH_UNKOWN_APNS_ERROR       -16
 #define ERROR_PUSH_OTHER_3000_ERROR        -17
+#define ERROR_PUSH_NEVER_PROMPTED          -18
+#define ERROR_PUSH_PROMPT_NEVER_ANWSERED   -19
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wundeclared-selector"
@@ -85,12 +87,30 @@ NSString* const kOSSettingsKeyInFocusDisplayOption = @"kOSSettingsKeyInFocusDisp
 NSString* const kOSSettingsKeyInOmitNoAppIdLogging = @"kOSSettingsKeyInOmitNoAppIdLogging";
 
 
-@interface OSSubcscriptionStatus : NSObject
- @property BOOL anwseredPrompt;
+@interface OSPermissionStatus : NSObject
+ @property (nonatomic) BOOL hasPrompted;
+ @property (nonatomic) BOOL anwseredPrompt;
  @property BOOL accepted;
 @end
 
-@implementation OSSubcscriptionStatus
+@implementation OSPermissionStatus
+// Override Getters
+// Returns logical turths so the comsumer of the object don't have to check more than one property
+
+- (BOOL) hasPrompted {
+    // If we know they anwsered turned notificaitons on then were prompted at some point.
+    if (self.anwseredPrompt) // self. calls getter method below
+        return true;
+    return _hasPrompted;
+}
+
+- (BOOL) anwseredPrompt {
+    // If we got an accepted permission then they anwsered the prompt.
+    if (_accepted)
+        return true;
+    return _anwseredPrompt;
+}
+
 @end
 
 @interface OSPendingCallbacks : NSObject
@@ -265,7 +285,7 @@ BOOL mShareLocation = YES;
         if (mUserId != nil)
             [self registerUser];
         else {
-            [self userAnsweredNotificationPrompt:^(OSSubcscriptionStatus *status) {
+            [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
                 if (status.anwseredPrompt)
                     [self registerUser];
                 else
@@ -382,7 +402,11 @@ void onesignal_Log(ONE_S_LOG_LEVEL logLevel, NSString* message) {
 + (void)registerForPushNotifications {
     [OneSignal onesignal_Log:ONE_S_LL_VERBOSE message:@"registerForPushNotifications Called!"];
     
-    // Futre iOS 10 device API update.
+    NSUserDefaults* userDefaults = [NSUserDefaults standardUserDefaults];
+    [userDefaults setBool:true forKey:@"OS_HAS_PROMPTED_FOR_NOTIFICATIONS"];
+    [userDefaults synchronize];
+    
+    // Future iOS 10 device API update.
     // registerUserNotificationSettings is deprecated in iOS 10 but still works. May need to switch to this in the future however.
     // [[NSClassFromString(@"UNUserNotificationCenter") currentNotificationCenter] requestAuthorizationWithOptions:7 completionHandler:^(
     //     BOOL granted, NSError * _Nullable error) {
@@ -726,7 +750,7 @@ void onesignal_Log(ONE_S_LOG_LEVEL logLevel, NSString* message) {
         // iOS 8 - We get a token right away but give the user 30 sec to respond to the system prompt.
         // Also check notification types so there is no waiting if user has already answered the system prompt.
         // The goal is to only have 1 server call.
-        [self userAnsweredNotificationPrompt:^(OSSubcscriptionStatus *status) {
+        [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
             if (status.anwseredPrompt)
                 [OneSignal registerUser];
             else {
@@ -1201,6 +1225,13 @@ static NSString *_lastnonActiveMessageId;
     if (mSubscriptionStatus < -9)
         return mSubscriptionStatus;
     
+    OSPermissionStatus* permissionStatus = [self getNotificationPermissionStatus];
+    if (!permissionStatus.hasPrompted)
+        return ERROR_PUSH_NEVER_PROMPTED;
+    if (!permissionStatus.anwseredPrompt)
+        return ERROR_PUSH_PROMPT_NEVER_ANWSERED;
+    
+    
     if (!mSubscriptionSet)
         return -2;
     
@@ -1220,25 +1251,94 @@ static NSString *_lastnonActiveMessageId;
         [self registerUser];
 }
 
-+ (void)userAnsweredNotificationPrompt:(void (^)(OSSubcscriptionStatus *anwsered))completionHandler {
+
++ (OSPermissionStatus*)getNotificationPermissionStatus {
+    __block OSPermissionStatus* returnStatus;
+    
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
+        returnStatus = status;
+        dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    return returnStatus;
+}
+
+
+/*
+ // Don't use, locks if run on the main thread due to the use of dispatch_get_main_queue in getNotificationPermissionStatus
++ (OSPermissionStatus*) getNotificationPermissionStatus {
+    __block OSPermissionStatus* returnStatus;
+    
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
+        returnStatus = status;
+        dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    return returnStatus;
+}
+ */
+
+/*
+ // dispatch_sync is throwing a not found runtime error.
++ (OSPermissionStatus*) getNotificationPermissionStatus {
+    __block OSPermissionStatus* returnStatus;
+    
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
+            returnStatus = status;
+        }];
+    });
+    
+    return returnStatus;
+}
+ */
+
+
+/*
+ // Can't create new thread here as it will still just lock on the main thread.
++ (OSPermissionStatus*) getNotificationPermissionStatus {
+    __block OSPermissionStatus* returnStatus;
+    
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
+            returnStatus = status;
+            dispatch_semaphore_signal(semaphore);
+        }];
+    });
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    return returnStatus;
+}
+*/
+
++ (void)getNotificationPermissionStatus:(void (^)(OSPermissionStatus *subcscriptionStatus))completionHandler {
+    NSUserDefaults* userDefaults = [NSUserDefaults standardUserDefaults];
+    OSPermissionStatus *status = [OSPermissionStatus alloc];
+    status.hasPrompted = [userDefaults boolForKey:@"OS_HAS_PROMPTED_FOR_NOTIFICATIONS"];
     
     if ([OneSignalHelper isIOSVersionGreaterOrEqual:10]) {
        Class unUserNotifClass = NSClassFromString(@"UNUserNotificationCenter");
        [[unUserNotifClass currentNotificationCenter] getNotificationSettingsWithCompletionHandler:^(id settings) {
            // Trigger callback on the main thread.
-           // Prevents any possiblitity creating thread locks by callling currentUserNotification from this block.
-           dispatch_async(dispatch_get_main_queue(), ^{
+           // Prevents any possiblitity of creating thread locks by callling currentUserNotification from this block.
+           
+           // TODO: Create test to check if currentUserNotification is run before completionHandler returns!
+           //       The fix implementation should be:
+           //        1. to use a cached value.
+          // dispatch_async(dispatch_get_main_queue(), ^{
                [OneSignal onesignal_Log:ONE_S_LL_VERBOSE message: [NSString stringWithFormat:@"getNotificationSettingsWithCompletionHandler Called: %@", settings]];
-               OSSubcscriptionStatus *status = [OSSubcscriptionStatus alloc];
                status.anwseredPrompt = [settings authorizationStatus] != 0;
                status.accepted = [settings authorizationStatus] == 2;
                completionHandler(status);
-           });
+          // });
         }];
     }
-    else { // Pre-iOS 10
-        NSUserDefaults* userDefaults = [NSUserDefaults standardUserDefaults];
-        OSSubcscriptionStatus *status = [OSSubcscriptionStatus alloc];
+    else { // Pre-iOS 10 - does not report this, track this ourselves.
         status.anwseredPrompt = [userDefaults boolForKey:@"OS_NOTIFICATION_PROMPT_ANSWERED"];
         
         // iOS 8+
@@ -1248,7 +1348,7 @@ static NSString *_lastnonActiveMessageId;
             status.accepted = mDeviceToken != nil;
             
             // No other iOS 7 event will trigger an awnsered event so do so here.
-            if (!status.anwseredPrompt && status.accepted) {
+            if (status.accepted) {
                 [userDefaults setBool:true forKey:@"OS_NOTIFICATION_PROMPT_ANSWERED"];
                 [userDefaults synchronize];
             }

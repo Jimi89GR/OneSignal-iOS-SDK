@@ -20,7 +20,7 @@
 #import "OneSignalTracker.h"
 #import "OneSignalSelectorHelpers.h"
 
-
+static XCTestCase* currentTestInstance;
 
 // Just for debugging
 void DumpObjcMethods(Class clz) {
@@ -246,6 +246,8 @@ static NSDictionary* nsbundleDictionary;
 static NSNumber *authorizationStatus;
 static NSSet<UNNotificationCategory *>* lastSetCategories;
 
+static BOOL runningGetNotificationSettingsWithCompletionHandler = false;
+
 + (void)load {
     injectToProperClass(@selector(overrideInitWithBundleIdentifier:), @selector(initWithBundleIdentifier:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
     injectToProperClass(@selector(overrideGetNotificationSettingsWithCompletionHandler:), @selector(getNotificationSettingsWithCompletionHandler:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
@@ -258,9 +260,11 @@ static NSSet<UNNotificationCategory *>* lastSetCategories;
 }
 
 - (void)overrideGetNotificationSettingsWithCompletionHandler:(void(^)(id settings))completionHandler {
+    runningGetNotificationSettingsWithCompletionHandler = true;
     id retSettings = [UNNotificationSettings alloc];
     [retSettings setValue:authorizationStatus forKeyPath:@"authorizationStatus"];
     completionHandler(retSettings);
+    runningGetNotificationSettingsWithCompletionHandler = false;
 }
 
 - (void)overrideSetNotificationCategories:(NSSet<UNNotificationCategory *> *)categories {
@@ -330,6 +334,11 @@ static BOOL shouldFireDeviceToken;
 
 
 - (UIUserNotificationSettings*) overrideCurrentUserNotificationSettings {
+    // Check for this as it will create thread locks on a real device.
+    //  TODO: Doesn't seem to catch offen.
+    if (runningGetNotificationSettingsWithCompletionHandler)
+        _XCTPrimitiveFail(currentTestInstance);
+    
     return [UIUserNotificationSettings settingsForTypes:notifTypesOverride categories:nil];
 }
 
@@ -426,6 +435,8 @@ static BOOL setupUIApplicationDelegate = false;
 - (void)setUp {
     [super setUp];
     
+    currentTestInstance = self;
+    
     mockIOSVersion = 10;
     
     timeOffset = 0;
@@ -484,7 +495,7 @@ static BOOL setupUIApplicationDelegate = false;
     nsbundleDictionary = @{};
 }
 
-- (void)setsetCurrentNotificationPermissionAsUnanwsered {
+- (void)setCurrentNotificationPermissionAsUnanwsered {
     notifTypesOverride = 0;
     authorizationStatus = [NSNumber numberWithInteger:UNAuthorizationStatusNotDetermined];
 }
@@ -613,7 +624,7 @@ static BOOL setupUIApplicationDelegate = false;
 }
 
 - (void)testInitOnSimulator {
-    [self setCurrentNotificationPermission:false];
+    [self setCurrentNotificationPermissionAsUnanwsered];
     [self backgroundModesDisabledInXcode];
     didFailRegistarationErrorCode = 3010;
     
@@ -639,7 +650,7 @@ static BOOL setupUIApplicationDelegate = false;
 - (void)testInitAcceptingNotificationsWithoutCapabilitesSet {
     [self backgroundModesDisabledInXcode];
     didFailRegistarationErrorCode = 3000;
-    [self setsetCurrentNotificationPermissionAsUnanwsered];
+    [self setCurrentNotificationPermissionAsUnanwsered];
     
     [self initOneSignal];
     XCTAssertNil(lastHTTPRequset);
@@ -651,8 +662,7 @@ static BOOL setupUIApplicationDelegate = false;
 }
 
 - (void)testPromptedButNeverAnwserNotificationPrompt {
-    notifTypesOverride = 0;
-    authorizationStatus = [NSNumber numberWithInteger:UNAuthorizationStatusNotDetermined];
+    [self setCurrentNotificationPermissionAsUnanwsered];
     
     [self initOneSignal];
     
@@ -663,11 +673,39 @@ static BOOL setupUIApplicationDelegate = false;
     [OneSignal performSelector:NSSelectorFromString(@"registerUser")];
     
     XCTAssertEqualObjects(lastHTTPRequset[@"app_id"], @"b2f7f966-d8cc-11e4-bed1-df8f05be55ba");
-    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @0);
+    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @-19);
+}
+
+- (void)testNotificationTypesWhenAlreadyAcceptedWithAutoPromptOffOnFristStartPreIos10 {
+    mockIOSVersion = 8;
+    
+    [OneSignal initWithLaunchOptions:nil appId:@"b2f7f966-d8cc-11e4-bed1-df8f05be55ba"
+            handleNotificationAction:nil
+                            settings:@{kOSSettingsKeyAutoPrompt: @false}];
+    
+    [self runBackgroundThreads];
+    
+    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @7);
+}
+
+
+- (void)testNeverPromptedStatus {
+    [self setCurrentNotificationPermissionAsUnanwsered];
+    
+    [OneSignal initWithLaunchOptions:nil appId:@"b2f7f966-d8cc-11e4-bed1-df8f05be55ba"
+            handleNotificationAction:nil
+                            settings:@{kOSSettingsKeyAutoPrompt: @false}];
+    
+    [self runBackgroundThreads];
+    // Triggers the 30 fallback to register device right away.
+    [OneSignal performSelector:NSSelectorFromString(@"registerUser")];
+    
+    XCTAssertEqualObjects(lastHTTPRequset[@"app_id"], @"b2f7f966-d8cc-11e4-bed1-df8f05be55ba");
+    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @-18);
 }
 
 - (void)testNotAcceptingNotificationsWithoutBackgroundModes {
-    notifTypesOverride = 0;
+    [self setCurrentNotificationPermissionAsUnanwsered];
     [self backgroundModesDisabledInXcode];
     
     [self initOneSignal];

@@ -487,9 +487,11 @@ void onesignal_Log(ONE_S_LOG_LEVEL logLevel, NSString* message) {
         [pendingSendTagCallbacks addObject:pendingCallbacks];
     }
     
-    
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sendTagsToServer) object:nil];
-    [self performSelector:@selector(sendTagsToServer) withObject:nil afterDelay:5];
+    
+    // Can't send tags yet as their isn't a player_id.
+    if (mUserId)
+        [self performSelector:@selector(sendTagsToServer) withObject:nil afterDelay:5];
 }
 
 // Called only with a delay to batch network calls.
@@ -896,6 +898,11 @@ static BOOL waitingForOneSReg = false;
     if (releaseMode == UIApplicationReleaseDev || releaseMode == UIApplicationReleaseAdHoc || releaseMode == UIApplicationReleaseWildcard)
         dataDic[@"test_type"] = [NSNumber numberWithInt:releaseMode];
     
+    if (tagsToSend) {
+        dataDic[@"tags"] = tagsToSend;
+        tagsToSend = nil;
+    }
+    
     [OneSignal onesignal_Log:ONE_S_LL_VERBOSE message:@"Calling OneSignal create/on_session"];
     
     NSData* postData = [NSJSONSerialization dataWithJSONObject:dataDic options:0 error:nil];
@@ -927,11 +934,8 @@ static BOOL waitingForOneSReg = false;
             if (mDeviceToken)
                [self updateDeviceToken:mDeviceToken onSuccess:tokenUpdateSuccessBlock onFailure:tokenUpdateFailureBlock];
             
-            
-            if (tagsToSend) {
-                [OneSignal sendTags:tagsToSend];
-                tagsToSend = nil;
-            }
+            if (tagsToSend)
+                [self performSelector:@selector(sendTagsToServer) withObject:nil afterDelay:5];
             
             // try to send location
             [OneSignalLocation sendLocation];
@@ -1252,22 +1256,9 @@ static NSString *_lastnonActiveMessageId;
 }
 
 
-+ (OSPermissionStatus*)getNotificationPermissionStatus {
-    __block OSPermissionStatus* returnStatus;
-    
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
-        returnStatus = status;
-        dispatch_semaphore_signal(semaphore);
-    }];
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-    
-    return returnStatus;
-}
 
 
-/*
- // Don't use, locks if run on the main thread due to the use of dispatch_get_main_queue in getNotificationPermissionStatus
+ // DON't USE IF, dispatch_get_main_queue is used in getNotificationPermissionStatus
 + (OSPermissionStatus*) getNotificationPermissionStatus {
     __block OSPermissionStatus* returnStatus;
     
@@ -1280,7 +1271,7 @@ static NSString *_lastnonActiveMessageId;
     
     return returnStatus;
 }
- */
+
 
 /*
  // dispatch_sync is throwing a not found runtime error.
@@ -1330,12 +1321,13 @@ static NSString *_lastnonActiveMessageId;
            // TODO: Create test to check if currentUserNotification is run before completionHandler returns!
            //       The fix implementation should be:
            //        1. to use a cached value.
-          // dispatch_async(dispatch_get_main_queue(), ^{
+          
+            //dispatch_async(dispatch_get_main_queue(), ^{
                [OneSignal onesignal_Log:ONE_S_LL_VERBOSE message: [NSString stringWithFormat:@"getNotificationSettingsWithCompletionHandler Called: %@", settings]];
                status.anwseredPrompt = [settings authorizationStatus] != 0;
                status.accepted = [settings authorizationStatus] == 2;
                completionHandler(status);
-          // });
+           // });
         }];
     }
     else { // Pre-iOS 10 - does not report this, track this ourselves.

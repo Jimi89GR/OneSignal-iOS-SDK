@@ -90,6 +90,7 @@ BOOL injectStaticSelector(Class newClass, SEL newSel, Class addToClass, SEL make
 
 static NSMutableArray* selectorsToRun;
 static BOOL instantRunPerformSelectorAfterDelay;
+static NSMutableArray* selectorNamesForInstantOnlyForFirstRun;
 
 + (void)load {
     injectToProperClass(@selector(overridePerformSelector:withObject:afterDelay:), @selector(performSelector:withObject:afterDelay:), @[], [NSObjectOverrider class], [NSObject class]);
@@ -97,8 +98,10 @@ static BOOL instantRunPerformSelectorAfterDelay;
 }
 
 - (void)overridePerformSelector:(SEL)aSelector withObject:(nullable id)anArgument afterDelay:(NSTimeInterval)delay {
-    if (instantRunPerformSelectorAfterDelay)
+    if (instantRunPerformSelectorAfterDelay || [selectorNamesForInstantOnlyForFirstRun containsObject:NSStringFromSelector(aSelector)]) {
+        [selectorNamesForInstantOnlyForFirstRun removeObject:NSStringFromSelector(aSelector)];
         [self performSelector:aSelector withObject:anArgument];
+    }
     else {
         SelectorToRun* selectorToRun = [SelectorToRun alloc];
         selectorToRun.runOn = self;
@@ -106,10 +109,6 @@ static BOOL instantRunPerformSelectorAfterDelay;
         selectorToRun.withObject = anArgument;
         [selectorsToRun addObject:selectorToRun];
     }
-}
-
-- (void)overridePerformSelector:(SEL)aSelector withObject:(nullable id)anArgument {
-    [self overridePerformSelector:aSelector withObject:anArgument];
 }
 
 + (void)runPendingSelectors {
@@ -246,9 +245,10 @@ static NSDictionary* nsbundleDictionary;
 static NSNumber *authorizationStatus;
 static NSSet<UNNotificationCategory *>* lastSetCategories;
 
-static BOOL runningGetNotificationSettingsWithCompletionHandler = false;
+static int getNotificationSettingsWithCompletionHandlerStackCount;
 
 + (void)load {
+    getNotificationSettingsWithCompletionHandlerStackCount =  0;
     injectToProperClass(@selector(overrideInitWithBundleIdentifier:), @selector(initWithBundleIdentifier:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
     injectToProperClass(@selector(overrideGetNotificationSettingsWithCompletionHandler:), @selector(getNotificationSettingsWithCompletionHandler:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
     injectToProperClass(@selector(overrideSetNotificationCategories:), @selector(setNotificationCategories:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
@@ -260,11 +260,11 @@ static BOOL runningGetNotificationSettingsWithCompletionHandler = false;
 }
 
 - (void)overrideGetNotificationSettingsWithCompletionHandler:(void(^)(id settings))completionHandler {
-    runningGetNotificationSettingsWithCompletionHandler = true;
+    getNotificationSettingsWithCompletionHandlerStackCount++;
     id retSettings = [UNNotificationSettings alloc];
     [retSettings setValue:authorizationStatus forKeyPath:@"authorizationStatus"];
     completionHandler(retSettings);
-    runningGetNotificationSettingsWithCompletionHandler = false;
+    getNotificationSettingsWithCompletionHandlerStackCount--;
 }
 
 - (void)overrideSetNotificationCategories:(NSSet<UNNotificationCategory *> *)categories {
@@ -335,8 +335,7 @@ static BOOL shouldFireDeviceToken;
 
 - (UIUserNotificationSettings*) overrideCurrentUserNotificationSettings {
     // Check for this as it will create thread locks on a real device.
-    //  TODO: Doesn't seem to catch offen.
-    if (runningGetNotificationSettingsWithCompletionHandler)
+    if (getNotificationSettingsWithCompletionHandlerStackCount > 0)
         _XCTPrimitiveFail(currentTestInstance);
     
     return [UIUserNotificationSettings settingsForTypes:notifTypesOverride categories:nil];
@@ -466,6 +465,7 @@ static BOOL setupUIApplicationDelegate = false;
     nsbundleDictionary = @{@"UIBackgroundModes": @[@"remote-notification"]};
     
     instantRunPerformSelectorAfterDelay = false;
+    selectorNamesForInstantOnlyForFirstRun = [@[] mutableCopy];
     selectorsToRun = [[NSMutableArray alloc] init];
     
     // TODO: Keep commented out for now, might need this later.
@@ -1018,6 +1018,27 @@ static BOOL setupUIApplicationDelegate = false;
     XCTAssertNil(lastHTTPRequset[@"tags"][@"key"]);
     XCTAssertEqualObjects(lastHTTPRequset[@"tags"][@"key2"], @"value2");
     XCTAssertEqual(networkRequestCount, 2);
+}
+
+- (void)testSendTagsBeforeRegisterComplete {
+    [self setCurrentNotificationPermissionAsUnanwsered];
+    
+    [self initOneSignal];
+    
+    selectorNamesForInstantOnlyForFirstRun = [@[@"sendTagsToServer"] mutableCopy];
+    
+    [OneSignal sendTag:@"key" value:@"value"];
+    // Do not try to send tag update yet as there isn't a player_id yet.
+    XCTAssertEqual(networkRequestCount, 0);
+    
+    [self anwserNotifiationPrompt:false];
+    //[NSObjectOverrider runPendingSelectors];
+    
+    // A single POST player create call should be made with tags included.
+    XCTAssertEqual(networkRequestCount, 1);
+    XCTAssertEqualObjects(lastHTTPRequset[@"tags"][@"key"], @"value");
+    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @0);
+    XCTAssertEqualObjects(lastHTTPRequset[@"identifier"], @"0000000000000000000000000000000000000000000000000000000000000000");
 }
 
 - (void)testFirstInitWithNotificationsAlreadyDeclined {

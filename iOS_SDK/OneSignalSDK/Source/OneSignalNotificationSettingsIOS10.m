@@ -70,7 +70,7 @@ OSPermissionStatus *cachedStatus;
         return cachedStatus;
     
     __block OSPermissionStatus* returnStatus = [OSPermissionStatus alloc];
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     NSLog(@"getNotificationPermissionStatus START");
     [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
         returnStatus = status;

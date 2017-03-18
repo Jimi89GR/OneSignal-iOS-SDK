@@ -56,8 +56,6 @@
     return returnStatus;
 }
 
-
-
 - (int) getNotificationTypes {
     return [[UIApplication sharedApplication] currentUserNotificationSettings].types;
 }

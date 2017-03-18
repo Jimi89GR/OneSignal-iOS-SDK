@@ -248,10 +248,15 @@ static int notifTypesOverride = 7;
 static NSNumber *authorizationStatus;
 static NSSet<UNNotificationCategory *>* lastSetCategories;
 
+static dispatch_queue_t serialQueue;
+
 static int getNotificationSettingsWithCompletionHandlerStackCount;
 
 + (void)load {
     getNotificationSettingsWithCompletionHandlerStackCount =  0;
+    
+    serialQueue = dispatch_queue_create("com.UNNotificationCenter", DISPATCH_QUEUE_SERIAL);
+    
     injectToProperClass(@selector(overrideInitWithBundleIdentifier:),
                         @selector(initWithBundleIdentifier:), @[],
                         [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
@@ -286,7 +291,11 @@ static int getNotificationSettingsWithCompletionHandlerStackCount;
         [retSettings setValue:[NSNumber numberWithInt:UNNotificationSettingEnabled] forKeyPath:@"lockScreenSetting"];
     }
     
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    // Simulates running on a sequential serial queue like iOS does.
+    dispatch_async(serialQueue, ^{
+        //if (getNotificationSettingsWithCompletionHandlerStackCount > 1)
+        //    _XCTPrimitiveFail(currentTestInstance);
+        //[NSThread sleepForTimeInterval:0.01];
         completionHandler(retSettings);
         getNotificationSettingsWithCompletionHandlerStackCount--;
     });
@@ -518,8 +527,10 @@ static BOOL setupUIApplicationDelegate = false;
     }
     
     // Uncomment to simulate slow travis-CI runs.
-    // NSLog(@"Sleeping for debugging");
-    // [NSThread sleepForTimeInterval:15];
+    /*float minRange = 0, maxRange = 15;
+    float random = ((float)arc4random() / 0x100000000 * (maxRange - minRange)) + minRange;
+    NSLog(@"Sleeping for debugging: %f", random);
+    [NSThread sleepForTimeInterval:random];*/
 }
 
 // Called after each test.

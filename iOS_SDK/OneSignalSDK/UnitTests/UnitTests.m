@@ -238,6 +238,9 @@ static NSDictionary* nsbundleDictionary;
 @end
 
 
+static int notifTypesOverride = 7;
+
+
 @interface UNUserNotificationCenterOverrider : NSObject
 @end
 @implementation UNUserNotificationCenterOverrider
@@ -249,10 +252,21 @@ static int getNotificationSettingsWithCompletionHandlerStackCount;
 
 + (void)load {
     getNotificationSettingsWithCompletionHandlerStackCount =  0;
-    injectToProperClass(@selector(overrideInitWithBundleIdentifier:), @selector(initWithBundleIdentifier:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
-    injectToProperClass(@selector(overrideGetNotificationSettingsWithCompletionHandler:), @selector(getNotificationSettingsWithCompletionHandler:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
-    injectToProperClass(@selector(overrideSetNotificationCategories:), @selector(setNotificationCategories:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
-    injectToProperClass(@selector(overrideGetNotificationCategoriesWithCompletionHandler:), @selector(getNotificationCategoriesWithCompletionHandler:), @[], [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
+    injectToProperClass(@selector(overrideInitWithBundleIdentifier:),
+                        @selector(initWithBundleIdentifier:), @[],
+                        [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
+    injectToProperClass(@selector(overrideGetNotificationSettingsWithCompletionHandler:),
+                        @selector(getNotificationSettingsWithCompletionHandler:), @[],
+                        [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
+    injectToProperClass(@selector(overrideSetNotificationCategories:),
+                        @selector(setNotificationCategories:), @[],
+                        [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
+    injectToProperClass(@selector(overrideGetNotificationCategoriesWithCompletionHandler:),
+                        @selector(getNotificationCategoriesWithCompletionHandler:), @[],
+                        [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
+    injectToProperClass(@selector(overrideRequestAuthorizationWithOptions:completionHandler:),
+                        @selector(requestAuthorizationWithOptions:completionHandler:), @[],
+                        [UNUserNotificationCenterOverrider class], [UNUserNotificationCenter class]);
 }
 
 - (id) overrideInitWithBundleIdentifier:(NSString*) bundle {
@@ -261,10 +275,21 @@ static int getNotificationSettingsWithCompletionHandlerStackCount;
 
 - (void)overrideGetNotificationSettingsWithCompletionHandler:(void(^)(id settings))completionHandler {
     getNotificationSettingsWithCompletionHandlerStackCount++;
+    
     id retSettings = [UNNotificationSettings alloc];
     [retSettings setValue:authorizationStatus forKeyPath:@"authorizationStatus"];
-    completionHandler(retSettings);
-    getNotificationSettingsWithCompletionHandlerStackCount--;
+    
+    if (notifTypesOverride >= 7) {
+        [retSettings setValue:[NSNumber numberWithInt:UNNotificationSettingEnabled] forKeyPath:@"badgeSetting"];
+        [retSettings setValue:[NSNumber numberWithInt:UNNotificationSettingEnabled] forKeyPath:@"soundSetting"];
+        [retSettings setValue:[NSNumber numberWithInt:UNNotificationSettingEnabled] forKeyPath:@"alertSetting"];
+        [retSettings setValue:[NSNumber numberWithInt:UNNotificationSettingEnabled] forKeyPath:@"lockScreenSetting"];
+    }
+    
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        completionHandler(retSettings);
+        getNotificationSettingsWithCompletionHandlerStackCount--;
+    });
 }
 
 - (void)overrideSetNotificationCategories:(NSSet<UNNotificationCategory *> *)categories {
@@ -275,17 +300,20 @@ static int getNotificationSettingsWithCompletionHandlerStackCount;
     completionHandler(lastSetCategories);
 }
 
+- (void)overrideRequestAuthorizationWithOptions:(UNAuthorizationOptions)options
+                              completionHandler:(void (^)(BOOL granted, NSError *error))completionHandler {
+    completionHandler(authorizationStatus == [NSNumber numberWithInteger:UNAuthorizationStatusAuthorized], nil);
+}
+
 @end
-
-
-
-static int notifTypesOverride = 7;
 
 @interface UIApplicationOverrider : NSObject
 @end
 @implementation UIApplicationOverrider
 
 static BOOL calledRegisterForRemoteNotifications;
+static BOOL calledCurrentUserNotificationSettings;
+
 static NSInteger didFailRegistarationErrorCode;
 static BOOL shouldFireDeviceToken;
 
@@ -294,6 +322,7 @@ static BOOL shouldFireDeviceToken;
     injectToProperClass(@selector(override_run), @selector(_run), @[], [UIApplicationOverrider class], [UIApplication class]);
     injectToProperClass(@selector(overrideCurrentUserNotificationSettings), @selector(currentUserNotificationSettings), @[], [UIApplicationOverrider class], [UIApplication class]);
     injectToProperClass(@selector(overrideRegisterForRemoteNotificationTypes:), @selector(registerForRemoteNotificationTypes:), @[], [UIApplicationOverrider class], [UIApplication class]);
+    injectToProperClass(@selector(overrideRegisterUserNotificationSettings:), @selector(registerUserNotificationSettings:), @[], [UIApplicationOverrider class], [UIApplication class]);
 }
 
 // Keeps UIApplicationMain(...) from looping to continue to the next line.
@@ -333,12 +362,19 @@ static BOOL shouldFireDeviceToken;
 }
 
 
+// iOS 8 & 9 Only
 - (UIUserNotificationSettings*) overrideCurrentUserNotificationSettings {
+    calledCurrentUserNotificationSettings = true;
+    
     // Check for this as it will create thread locks on a real device.
     if (getNotificationSettingsWithCompletionHandlerStackCount > 0)
         _XCTPrimitiveFail(currentTestInstance);
     
     return [UIUserNotificationSettings settingsForTypes:notifTypesOverride categories:nil];
+}
+
+// KEEP - Used to prevent xctest from fowarding to the iOS 10 equivalent.
+- (void)overrideRegisterUserNotificationSettings:(UIUserNotificationSettings *)notificationSettings {
 }
 
 @end
@@ -461,6 +497,7 @@ static BOOL setupUIApplicationDelegate = false;
     
     shouldFireDeviceToken = true;
     calledRegisterForRemoteNotifications = false;
+    calledCurrentUserNotificationSettings = false;
     didFailRegistarationErrorCode = 0;
     nsbundleDictionary = @{@"UIBackgroundModes": @[@"remote-notification"]};
     
@@ -468,8 +505,7 @@ static BOOL setupUIApplicationDelegate = false;
     selectorNamesForInstantOnlyForFirstRun = [@[] mutableCopy];
     selectorsToRun = [[NSMutableArray alloc] init];
     
-    // TODO: Keep commented out for now, might need this later.
-    // [OneSignal performSelector:NSSelectorFromString(@"clearStatics")];
+    [OneSignal performSelector:NSSelectorFromString(@"clearStatics")];
     
     [NSUserDefaultsOverrider clearInternalDictionary];
     
@@ -530,7 +566,39 @@ static BOOL setupUIApplicationDelegate = false;
 
 // Runs any blocks passed to dispatch_async()
 - (void)runBackgroundThreads {
-    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
+    // Seems to run just one job at a time without an indication if there are more blocks to run.
+    for(int i = 0; i < 10; i++)
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    
+    
+    // Below is an atempt to wait for all other blocks on the dispatch_get_global_queue to finish.
+    /*
+    dispatch_barrier_sync(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSLog(@"dispatch_barrier_sync");
+    });
+    
+    NSLog(@"after fist dispatch_barrier_sync");
+    
+    //bool output = [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
+    BOOL output = [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    NSLog(@"currentRunLoop: %d", output);
+    
+   // dispatch_group_wait(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), DISPATCH_TIME_FOREVER);
+
+
+    dispatch_barrier_sync(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSLog(@"dispatch_barrier_sync");
+    });
+    
+    output = [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    NSLog(@"currentRunLoop: %d", output);
+    
+    //output = [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    //NSLog(@"currentRunLoop: %d", output);
+    
+    //[[NSRunLoop currentRunLoop] runMode:NSRunLoopCommonModes beforeDate:[NSDate distantFuture]];
+     */
+    
 }
 
 
@@ -580,7 +648,7 @@ static BOOL setupUIApplicationDelegate = false;
     
     XCTAssertEqualObjects(lastHTTPRequset[@"app_id"], @"b2f7f966-d8cc-11e4-bed1-df8f05be55ba");
     XCTAssertEqualObjects(lastHTTPRequset[@"identifier"], @"0000000000000000000000000000000000000000000000000000000000000000");
-    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @7);
+    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @15);
     XCTAssertEqualObjects(lastHTTPRequset[@"device_model"], @"x86_64");
     XCTAssertEqualObjects(lastHTTPRequset[@"device_type"], @0);
     XCTAssertEqualObjects(lastHTTPRequset[@"language"], @"en-US");
@@ -612,8 +680,10 @@ static BOOL setupUIApplicationDelegate = false;
     XCTAssertNil(lastHTTPRequset);
     
     XCTAssertEqual(networkRequestCount, 1);
-    // Make sure calledRegisterForRemoteNotifications didn't fire as this isn't available on iOS 7
+    
+    // Make the following methods were not called as they are not available on iOS 7
     XCTAssertFalse(calledRegisterForRemoteNotifications);
+    XCTAssertFalse(calledCurrentUserNotificationSettings);
 }
 
 // Seen a few rare crash reports where [NSLocale preferredLanguages] resturns an empty array
@@ -1024,14 +1094,18 @@ static BOOL setupUIApplicationDelegate = false;
     [self setCurrentNotificationPermissionAsUnanwsered];
     
     [self initOneSignal];
+    [self runBackgroundThreads];
     
     selectorNamesForInstantOnlyForFirstRun = [@[@"sendTagsToServer"] mutableCopy];
     
     [OneSignal sendTag:@"key" value:@"value"];
+    [self runBackgroundThreads];
+    
     // Do not try to send tag update yet as there isn't a player_id yet.
     XCTAssertEqual(networkRequestCount, 0);
     
     [self anwserNotifiationPrompt:false];
+    [self runBackgroundThreads];
     //[NSObjectOverrider runPendingSelectors];
     
     // A single POST player create call should be made with tags included.
@@ -1041,12 +1115,15 @@ static BOOL setupUIApplicationDelegate = false;
     XCTAssertEqualObjects(lastHTTPRequset[@"identifier"], @"0000000000000000000000000000000000000000000000000000000000000000");
 }
 
+// This test is picker about background threads not finishing than most other tests.
 - (void)testFirstInitWithNotificationsAlreadyDeclined {
     [self backgroundModesDisabledInXcode];
     notifTypesOverride = 0;
     authorizationStatus = [NSNumber numberWithInteger:UNAuthorizationStatusDenied];
     
+    NSLog(@"BEFORE initOneSignal");
     [self initOneSignal];
+    NSLog(@"BEFORE runBackgroundThreads");
     [self runBackgroundThreads];
     
     XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @0);
@@ -1065,10 +1142,10 @@ static BOOL setupUIApplicationDelegate = false;
     XCTAssertNil(lastHTTPRequset[@"identifier"]);
     
     [self backgroundApp];
-    notifTypesOverride = 7;
+    [self setCurrentNotificationPermission:true];
     [self resumeApp];
     
-    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @7);
+    XCTAssertEqualObjects(lastHTTPRequset[@"notification_types"], @15);
     XCTAssertEqualObjects(lastHTTPRequset[@"identifier"], @"0000000000000000000000000000000000000000000000000000000000000000");
     XCTAssertEqual(networkRequestCount, 2);
 }

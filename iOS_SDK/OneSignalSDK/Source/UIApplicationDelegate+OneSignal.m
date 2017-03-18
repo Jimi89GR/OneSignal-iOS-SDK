@@ -137,8 +137,6 @@ static NSArray* delegateSubclasses = nil;
 
 
 
-
-
 - (void)oneSignalDidRegisterForRemoteNotifications:(UIApplication*)app deviceToken:(NSData*)inDeviceToken {
     [OneSignal onesignal_Log:ONE_S_LL_VERBOSE message:@"oneSignalDidRegisterForRemoteNotifications:deviceToken:"];
     
@@ -159,6 +157,7 @@ static NSArray* delegateSubclasses = nil;
         [self oneSignalDidFailRegisterForRemoteNotification:app error:err];
 }
 
+// TODO: iOS 10 - we can omit sizzling this after we add requestAuthorizationWithOptions
 - (void)oneSignalDidRegisterUserNotifications:(UIApplication*)application settings:(UIUserNotificationSettings*)notificationSettings {
     [OneSignal onesignal_Log:ONE_S_LL_VERBOSE message:@"oneSignalDidRegisterUserNotifications:settings:"];
     

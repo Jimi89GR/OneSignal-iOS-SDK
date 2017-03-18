@@ -39,6 +39,11 @@
 #import "OneSignalSelectorHelpers.h"
 #import "UIApplicationDelegate+OneSignal.h"
 
+#import "OneSignalNotificationSettings.h"
+#import "OneSignalNotificationSettingsIOS10.h"
+#import "OneSignalNotificationSettingsIOS8.h"
+#import "OneSignalNotificationSettingsIOS7.h"
+
 #import <stdlib.h>
 #import <stdio.h>
 #import <sys/types.h>
@@ -47,7 +52,11 @@
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 
+
+#ifdef XC8_AVAILABLE
 #import <UserNotifications/UserNotifications.h>
+#endif
+
 
 #define NOTIFICATION_TYPE_NONE 0
 #define NOTIFICATION_TYPE_BADGE 1
@@ -86,12 +95,6 @@ NSString* const kOSSettingsKeyInFocusDisplayOption = @"kOSSettingsKeyInFocusDisp
 /* Omit no app_id error logging, for use with wrapper SDKs. */
 NSString* const kOSSettingsKeyInOmitNoAppIdLogging = @"kOSSettingsKeyInOmitNoAppIdLogging";
 
-
-@interface OSPermissionStatus : NSObject
- @property (nonatomic) BOOL hasPrompted;
- @property (nonatomic) BOOL anwseredPrompt;
- @property BOOL accepted;
-@end
 
 @implementation OSPermissionStatus
 // Override Getters
@@ -156,6 +159,8 @@ BOOL disableBadgeClearing = NO;
 BOOL mSubscriptionSet;
 BOOL mShareLocation = YES;
 
+NSObject<OneSignalNotificationSettings>* osNotificationSettings;
+
 + (void) setMSubscriptionStatus:(NSNumber*)status {
     mSubscriptionStatus = [status intValue];
 }
@@ -170,6 +175,14 @@ BOOL mShareLocation = YES;
 
 + (void) setMSDKType:(NSString*)type {
     mSDKType = type;
+}
+
++ (NSString*)getDeviceToken {
+    return mDeviceToken;
+}
+
++(void)clearStatics {
+    osNotificationSettings = nil;
 }
 
 //Set to false as soon as it's read.
@@ -202,6 +215,16 @@ BOOL mShareLocation = YES;
     
     if ([@"b2f7f966-d8cc-11eg-bed1-df8f05be55ba" isEqualToString:appId] || [@"5eb5a37e-b458-11e3-ac11-000c2940e62c" isEqualToString:appId])
         onesignal_Log(ONE_S_LL_WARN, @"OneSignal Example AppID detected, please update to your app's id found on OneSignal.com");
+    
+    
+    if (!osNotificationSettings) {
+        if ([OneSignalHelper isIOSVersionGreaterOrEqual:10])
+            osNotificationSettings = [OneSignalNotificationSettingsIOS10 alloc];
+        else if ([OneSignalHelper isIOSVersionGreaterOrEqual:8])
+            osNotificationSettings = [OneSignalNotificationSettingsIOS8 alloc];
+        else
+            osNotificationSettings = [OneSignalNotificationSettingsIOS7 alloc];
+    }
     
     if (mShareLocation)
        [OneSignalLocation getLocation:false];
@@ -240,10 +263,12 @@ BOOL mShareLocation = YES;
         
         mUserId = [userDefaults stringForKey:@"GT_PLAYER_ID"];
         mDeviceToken = [userDefaults stringForKey:@"GT_DEVICE_TOKEN"];
-        if ([OneSignalHelper canGetNotificationTypes])
-            registeredWithApple = [self accpetedNotificationPermission];
+        if ([OneSignalHelper isIOSVersionGreaterOrEqual:8])
+            registeredWithApple = [osNotificationSettings getNotificationPermissionStatus].accepted;
         else
-            registeredWithApple = mDeviceToken != nil || [userDefaults boolForKey:@"GT_REGISTERED_WITH_APPLE"];
+            registeredWithApple = mDeviceToken != nil || [userDefaults boolForKey:@"GT_REGISTERED_WITH_APPLE"]; // TODO: GT_REGISTERED_WITH_APPLE is a hold up to removing this if-else for iOS 7
+        
+        
         mSubscriptionSet = [userDefaults objectForKey:@"ONESIGNAL_SUBSCRIPTION"] == nil;
         
         // Check if disabled in-app launch url if passed a NO
@@ -285,7 +310,7 @@ BOOL mShareLocation = YES;
         if (mUserId != nil)
             [self registerUser];
         else {
-            [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
+            [osNotificationSettings getNotificationPermissionStatus:^(OSPermissionStatus *status) {
                 if (status.anwseredPrompt)
                     [self registerUser];
                 else
@@ -384,7 +409,7 @@ void onesignal_Log(ONE_S_LOG_LEVEL logLevel, NSString* message) {
     // Only try to register for a pushToken if:
     //  - The user accepted notifications
     //  - "Background Modes" > "Remote Notifications" are enabled in Xcode
-    if (![self accpetedNotificationPermission] && !backgroundModesEnabled)
+    if (![osNotificationSettings getNotificationPermissionStatus].accepted && !backgroundModesEnabled)
         return false;
     
     // Don't attempt to register again if there was a non-recoverable error.
@@ -414,13 +439,8 @@ void onesignal_Log(ONE_S_LOG_LEVEL logLevel, NSString* message) {
     
     UIApplication* shardApp = [UIApplication sharedApplication];
     
-    if ([OneSignalHelper isIOSVersionGreaterOrEqual:8]) {
-        // Get all current Categories so we don't remove any of the app developer's.
-        NSSet* categories = [[shardApp currentUserNotificationSettings] categories];
-        
-        [shardApp registerUserNotificationSettings:[UIUserNotificationSettings settingsForTypes:NOTIFICATION_TYPE_ALL categories:categories]];
-        [self registerForAPNsToken];
-    }
+    if ([OneSignalHelper isIOSVersionGreaterOrEqual:8])
+        [osNotificationSettings promptForNotifications];
     else { // For iOS 6 & 7 devices
         [shardApp registerForRemoteNotificationTypes:UIRemoteNotificationTypeBadge | UIRemoteNotificationTypeSound | UIRemoteNotificationTypeAlert];
         if (!registeredWithApple) {
@@ -752,7 +772,7 @@ void onesignal_Log(ONE_S_LOG_LEVEL logLevel, NSString* message) {
         // iOS 8 - We get a token right away but give the user 30 sec to respond to the system prompt.
         // Also check notification types so there is no waiting if user has already answered the system prompt.
         // The goal is to only have 1 server call.
-        [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
+        [osNotificationSettings getNotificationPermissionStatus:^(OSPermissionStatus *status) {
             if (status.anwseredPrompt)
                 [OneSignal registerUser];
             else {
@@ -958,21 +978,11 @@ static BOOL waitingForOneSReg = false;
     }];
 }
 
-+(BOOL)accpetedNotificationPermission {
-    if ([OneSignalHelper canGetNotificationTypes])
-        return [[UIApplication sharedApplication] currentUserNotificationSettings].types > 0;
-    else
-        return mDeviceToken != nil;
-}
-
 +(NSString*) getUsableDeviceToken {
     if (mSubscriptionStatus < -1)
         return NULL;
     
-    if (![OneSignalHelper canGetNotificationTypes])
-        return mDeviceToken;
-    
-    return [self accpetedNotificationPermission] ? mDeviceToken : NULL;
+    return [osNotificationSettings getNotificationPermissionStatus].accepted ? mDeviceToken : NULL;
 }
 
 // Updates the server with the new user's notification setting or subscription status changes
@@ -1206,7 +1216,7 @@ static NSString *_lastnonActiveMessageId;
         disableBadgeClearing = NO;
     
     if (disableBadgeClearing ||
-        ([OneSignalHelper canGetNotificationTypes] && [[UIApplication sharedApplication] currentUserNotificationSettings].types & NOTIFICATION_TYPE_BADGE) == 0)
+        ([OneSignalHelper isIOSVersionGreaterOrEqual:8] && [osNotificationSettings getNotificationPermissionStatus].notificationTypes & NOTIFICATION_TYPE_BADGE) == 0)
         return false;
     
     bool wasBadgeSet = [UIApplication sharedApplication].applicationIconBadgeNumber > 0;
@@ -1229,7 +1239,8 @@ static NSString *_lastnonActiveMessageId;
     if (mSubscriptionStatus < -9)
         return mSubscriptionStatus;
     
-    OSPermissionStatus* permissionStatus = [self getNotificationPermissionStatus];
+    OSPermissionStatus* permissionStatus = [osNotificationSettings getNotificationPermissionStatus];
+    
     if (!permissionStatus.hasPrompted)
         return ERROR_PUSH_NEVER_PROMPTED;
     if (!permissionStatus.anwseredPrompt)
@@ -1238,13 +1249,8 @@ static NSString *_lastnonActiveMessageId;
     
     if (!mSubscriptionSet)
         return -2;
-    
-    if ([OneSignalHelper canGetNotificationTypes])
-        return [[UIApplication sharedApplication] currentUserNotificationSettings].types;
-    else if (mDeviceToken)
-        return NOTIFICATION_TYPE_ALL;
-    
-    return 0;
+
+    return permissionStatus.notificationTypes;
 }
 
 + (void)setSubscriptionErrorStatus:(int)errorType {
@@ -1255,110 +1261,15 @@ static NSString *_lastnonActiveMessageId;
         [self registerUser];
 }
 
-
-
-
- // DON't USE IF, dispatch_get_main_queue is used in getNotificationPermissionStatus
-+ (OSPermissionStatus*) getNotificationPermissionStatus {
-    __block OSPermissionStatus* returnStatus;
-    
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
-        returnStatus = status;
-        dispatch_semaphore_signal(semaphore);
-    }];
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-    
-    return returnStatus;
-}
-
-
-/*
- // dispatch_sync is throwing a not found runtime error.
-+ (OSPermissionStatus*) getNotificationPermissionStatus {
-    __block OSPermissionStatus* returnStatus;
-    
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
-            returnStatus = status;
-        }];
-    });
-    
-    return returnStatus;
-}
- */
-
-
-/*
- // Can't create new thread here as it will still just lock on the main thread.
-+ (OSPermissionStatus*) getNotificationPermissionStatus {
-    __block OSPermissionStatus* returnStatus;
-    
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [self getNotificationPermissionStatus:^(OSPermissionStatus *status) {
-            returnStatus = status;
-            dispatch_semaphore_signal(semaphore);
-        }];
-    });
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-    
-    return returnStatus;
-}
-*/
-
-+ (void)getNotificationPermissionStatus:(void (^)(OSPermissionStatus *subcscriptionStatus))completionHandler {
-    NSUserDefaults* userDefaults = [NSUserDefaults standardUserDefaults];
-    OSPermissionStatus *status = [OSPermissionStatus alloc];
-    status.hasPrompted = [userDefaults boolForKey:@"OS_HAS_PROMPTED_FOR_NOTIFICATIONS"];
-    
-    if ([OneSignalHelper isIOSVersionGreaterOrEqual:10]) {
-       Class unUserNotifClass = NSClassFromString(@"UNUserNotificationCenter");
-       [[unUserNotifClass currentNotificationCenter] getNotificationSettingsWithCompletionHandler:^(id settings) {
-           // Trigger callback on the main thread.
-           // Prevents any possiblitity of creating thread locks by callling currentUserNotification from this block.
-           
-           // TODO: Create test to check if currentUserNotification is run before completionHandler returns!
-           //       The fix implementation should be:
-           //        1. to use a cached value.
-          
-            //dispatch_async(dispatch_get_main_queue(), ^{
-               [OneSignal onesignal_Log:ONE_S_LL_VERBOSE message: [NSString stringWithFormat:@"getNotificationSettingsWithCompletionHandler Called: %@", settings]];
-               status.anwseredPrompt = [settings authorizationStatus] != 0;
-               status.accepted = [settings authorizationStatus] == 2;
-               completionHandler(status);
-           // });
-        }];
-    }
-    else { // Pre-iOS 10 - does not report this, track this ourselves.
-        status.anwseredPrompt = [userDefaults boolForKey:@"OS_NOTIFICATION_PROMPT_ANSWERED"];
-        
-        // iOS 8+
-        if ([OneSignalHelper canGetNotificationTypes])
-            status.accepted = [[UIApplication sharedApplication] currentUserNotificationSettings].types > 0;
-        else { // iOS 7
-            status.accepted = mDeviceToken != nil;
-            
-            // No other iOS 7 event will trigger an awnsered event so do so here.
-            if (status.accepted) {
-                [userDefaults setBool:true forKey:@"OS_NOTIFICATION_PROMPT_ANSWERED"];
-                [userDefaults synchronize];
-            }
-        }
-        
-        completionHandler(status);
-    }
-}
-
 // iOS 8.0+ only
 //    User just responed to the iOS native notification permission prompt.
 //    Also extra calls to registerUserNotificationSettings will fire this without prompting again.
-+ (void) updateNotificationTypes:(int)notificationTypes {
-   if (![OneSignalHelper isIOSVersionGreaterOrEqual:10]) {
++ (void)updateNotificationTypes:(int)notificationTypes {
+    if (![OneSignalHelper isIOSVersionGreaterOrEqual:10]) {
         NSUserDefaults* userDefaults = [NSUserDefaults standardUserDefaults];
         [userDefaults setBool:true forKey:@"OS_NOTIFICATION_PROMPT_ANSWERED"];
         [userDefaults synchronize];
-   }
+    }
     
     BOOL startedRegister = [self registerForAPNsToken];
     
